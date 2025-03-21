@@ -1,4 +1,4 @@
-name: build
+name: Optimized Build Workflow
 
 on:
   workflow_dispatch:
@@ -91,8 +91,6 @@ jobs:
         run: |
           TIMESTAMP=$(date --utc -d $REPO_DATE +%s)
           DAYS=$(( ( $(date --utc +%s) - $TIMESTAMP ) / 86400 ))
-          echo "Repository activity: $(date --utc -d $REPO_DATE)"
-          echo "Commit: $URL"
           if [[ "${{ github.event_name }}" != "schedule" || $DAYS -lt 1 ]]; then
             echo "is_active=true" >> $GITHUB_OUTPUT
           else
@@ -122,67 +120,13 @@ jobs:
           - tuf_ax4200
           - tuf_ax6000
     steps:
-      - name: Cache OpenWrt sources
-        id: cache-openwrt
+      - name: Cache dependencies
         uses: actions/cache@v3
         with:
-          path: ${{ env.BUILD_ROOT }}
-          key: openwrt-${{ env.REPO_BRANCH }}-${{ hashFiles('version.mk') }}
-          restore-keys: |
-            openwrt-${{ env.REPO_BRANCH }}-
+          path: ${{ github.workspace }}/dependencies-ubuntu.txt
+          key: ${{ runner.os }}-deps-${{ hashFiles('dependencies-ubuntu.txt') }}
 
-      - name: Download or update OpenWrt sources
-        run: |
-          if [ -d $BUILD_ROOT/.git ]; then
-            echo "Restoring OpenWrt sources from cache..."
-            cd $BUILD_ROOT
-            git reset --hard HEAD
-            git clean -fdx
-            git pull origin $REPO_BRANCH
-          else
-            echo "Cloning OpenWrt sources..."
-            git clone --branch $REPO_BRANCH --depth 1 $REPO_URL.git $BUILD_ROOT
-          fi
-
-      - name: Cache OpenWrt feeds
-        id: cache-feeds
-        uses: actions/cache@v3
-        with:
-          path: ${{ env.BUILD_ROOT }}/feeds
-          key: openwrt-feeds-${{ env.REPO_BRANCH }}-${{ hashFiles('feeds.conf.default') }}
-          restore-keys: |
-            openwrt-feeds-${{ env.REPO_BRANCH }}-
-
-      - name: Update OpenWrt feeds
-        run: |
-          cd $BUILD_ROOT
-          if [ -d feeds ]; then
-            echo "Updating OpenWrt feeds..."
-            ./scripts/feeds update -a
-          else
-            echo "Installing OpenWrt feeds..."
-            ./scripts/feeds install -a
-          fi
-
-      - name: Cache build artifacts
-        id: cache-build
-        uses: actions/cache@v3
-        with:
-          path: |
-            ${{ env.BUILD_ROOT }}/build_dir
-            ${{ env.BUILD_ROOT }}/staging_dir
-            ~/.ccache
-          key: openwrt-build-${{ env.REPO_BRANCH }}-${{ hashFiles('**/.config') }}
-          restore-keys: |
-            openwrt-build-${{ env.REPO_BRANCH }}-
-
-      - name: Setup ccache
-        run: |
-          sudo apt-get -qq install ccache
-          echo 'export PATH="/usr/lib/ccache:$PATH"' >> ~/.bashrc
-          source ~/.bashrc
-
-      - name: Initialization environment
+      - name: Initialize environment
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -202,7 +146,10 @@ jobs:
       - name: Checkout builder
         uses: actions/checkout@main
 
-      - name: Init builder
+      - name: Download OpenWrt sources
+        run: git clone --branch $REPO_BRANCH $REPO_URL.git $BUILD_ROOT
+
+      - name: Initialize builder
         shell: bash
         run: |
           rsync -avq --exclude=".*" --exclude="$(basename $BUILD_ROOT)" ${{ github.workspace }}/ $BUILD_ROOT/
@@ -210,57 +157,50 @@ jobs:
           chmod +x *.sh
           wget https://github.com/fantastic-packages/packages/raw/refs/heads/24.10/keys/usign/53FF2B6672243D28.pub
 
+      - name: Cache OpenWrt build artifacts
+        uses: klever1988/cachewrtbuild@main
+        with:
+          ccache: 'true'
+          toolchain: 'true'
+          prefix: 'openwrt'
+
       - name: Update OpenWrt packages
         id: update
         run: |
           cd $BUILD_ROOT && ./xupdate.sh -f
           echo "status=success" >> $GITHUB_OUTPUT
 
-      - name: Build the firmware image
+      - name: Build firmware image
         id: compile
         if: steps.update.outputs.status == 'success'
         env:
           TARGET: ${{ matrix.target }}
           FW_VER: ${{ needs.check.outputs.fw_ver }}
         run: |
+          set -x
           cd $BUILD_ROOT
           MAKE_JOBS=$(($(nproc)+1))
-          echo "$MAKE_JOBS thread compile"
-          # init build config
           ./xmake.sh -I -t $TARGET
           G_DEVICE_NAME=$(grep -so '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')
-          [ -z "$G_DEVICE_NAME" ] && exit 31
           G_BOARD_NAME=$(grep -so '^CONFIG_TARGET_BOARD=.*' .config | cut -d'"' -f2)
-          [ -z "$G_BOARD_NAME" ] && exit 32
           G_SUBTARGET_NAME=$(grep -so '^CONFIG_TARGET_SUBTARGET=.*' .config | cut -d'"' -f2)
-          [ -z "$G_SUBTARGET_NAME" ] && exit 33
           VERMAGIC_LIST="vermagic-$G_BOARD_NAME-$G_SUBTARGET_NAME-*.list"
-          if [ $(find . -maxdepth 1 -name "$VERMAGIC_LIST" | wc -l) = "0" ]; then
+          if [ ! -f $VERMAGIC_LIST ]; then
             ./vermagic_update.sh $G_BOARD_NAME $G_SUBTARGET_NAME
           fi
-          if [ $(find . -maxdepth 1 -name "$VERMAGIC_LIST" | wc -l) = "0" ]; then
-            exit 41
-          fi
-          # run build
           [ "$FAKE_BUILD" != "true" ] && make -j $MAKE_JOBS download world
-          # process results
           FILE_DATE=$(date --utc +'%y%m%d')
           OUT_DIR=$BUILD_ROOT/bin/targets/$G_BOARD_NAME/$G_SUBTARGET_NAME
           if [ "$FAKE_BUILD" = "true" ]; then
-            mkdir -p logs
-            mkdir -p $OUT_DIR
+            mkdir -p logs $OUT_DIR
             echo "$G_BOARD_NAME $G_SUBTARGET_NAME $G_DEVICE_NAME" > "$OUT_DIR/$G_DEVICE_NAME.txt"
             touch "$OUT_DIR/kernel-debug.tar.zst"
-            ls -la
             BLD_VER=$FW_VER
           else
-            BLD_VER=$(cat $OUT_DIR/profiles.json | grep -so '"version_number":"[^"]*' | grep -so '[^"]*$')
+            BLD_VER=$(cat $OUT_DIR/profiles.json | jq -r '.version_number')
           fi
           echo "Firmware $BLD_VER [$FILE_DATE] built!"
-          if [ ! -f $OUT_DIR/kernel-debug.tar.zst ]; then
-            echo "File kernel-debug.tar.zst not found!"
-            exit 100
-          fi
+          [ -f $OUT_DIR/kernel-debug.tar.zst ] || { echo "File kernel-debug.tar.zst not found!"; exit 100; }
           echo "status=success" >> $GITHUB_OUTPUT
           echo "DEVICE_NAME=$G_DEVICE_NAME" >> $GITHUB_ENV
           echo "BOARD_NAME=$G_BOARD_NAME" >> $GITHUB_ENV
@@ -271,10 +211,8 @@ jobs:
 
       - name: Cleanup OUT directory
         if: steps.compile.outputs.status == 'success'
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
         run: |
-          cd $OUT_DIR
+          cd ${{ env.OUT_DIR }}
           rm -rf packages kernel-* *uImage *ubi-cleaner* *-ram-*.bin
 
       - name: Upload artifacts
@@ -300,7 +238,6 @@ jobs:
         with:
           name: logs-${{ matrix.target }}-${{ env.FW_DATE }}
           path: logs-*.tar.xz
-
 
   release:
     needs: [check, build]
