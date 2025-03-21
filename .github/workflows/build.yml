@@ -63,7 +63,7 @@ jobs:
           echo "FW_DATE=$FW_DATE" >> $GITHUB_ENV
           echo "TAG=$TAG" >> $GITHUB_ENV
           wget $REPO_URL/raw/refs/heads/$BRANCH/include/version.mk
-          FW_VER=$(awk -F'[(),]' '/^VERSION_NUMBER:=$\(if/ {print $4}' version.mk)
+          FW_VER=$(grep -oP '^VERSION_NUMBER:=\$\(if.*,\K[^)]+' version.mk)
           if [ -z "$FW_VER" ]; then
             echo "ERROR: Cannot find VERSION_NUMBER in version.mk"
             exit 90
