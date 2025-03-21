@@ -211,10 +211,17 @@ jobs:
           path: ${{ env.OUT_DIR }}
           if-no-files-found: error
 
-      - name: Compress and upload logs
+      - name: Compress build logs
         if: always()
+        env:
+          TARGET: ${{ matrix.target }}
+          FW_DATE: ${{ needs.check.outputs.fw_date }}
+          LOGS_DIR: ${{ env.BUILD_ROOT }}/logs
         run: |
-          tar -cJvf logs-${{ matrix.target }}-${{ env.FW_DATE }}.tar.xz ${{ env.BUILD_ROOT }}/logs
+          tar -cJvf logs-$TARGET-$FW_DATE.tar.xz $LOGS_DIR
+
+      - name: Upload build logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: logs-${{ matrix.target }}-${{ env.FW_DATE }}
