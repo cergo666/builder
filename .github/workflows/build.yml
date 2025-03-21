@@ -143,11 +143,57 @@ jobs:
           remove-codeql: true
           remove-docker-images: true
 
+      - name: Cache OpenWrt sources
+        id: cache-openwrt
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.BUILD_ROOT }}
+          key: openwrt-sources-${{ env.REPO_BRANCH }}-${{ hashFiles('version.mk') }}
+          restore-keys: |
+            openwrt-sources-${{ env.REPO_BRANCH }}-
+
+      - name: Download or update OpenWrt sources
+        run: |
+          if [ -d $BUILD_ROOT/.git ]; then
+            echo "Restoring OpenWrt sources from cache..."
+            cd $BUILD_ROOT
+            git reset --hard HEAD
+            git clean -fdx
+            git pull origin $REPO_BRANCH
+          else
+            echo "Cloning OpenWrt sources..."
+            git clone --branch $REPO_BRANCH --depth 1 $REPO_URL.git $BUILD_ROOT
+          fi
+
+      - name: Cache OpenWrt feeds
+        id: cache-feeds
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.BUILD_ROOT }}/feeds
+          key: openwrt-feeds-${{ env.REPO_BRANCH }}-${{ hashFiles('feeds.conf.default') }}
+          restore-keys: |
+            openwrt-feeds-${{ env.REPO_BRANCH }}-
+
+      - name: Update OpenWrt feeds
+        run: |
+          cd $BUILD_ROOT
+          if [ -d feeds ]; then
+            echo "Updating OpenWrt feeds..."
+            ./scripts/feeds update -a
+          else
+            echo "Installing OpenWrt feeds..."
+            ./scripts/feeds install -a
+          fi
+
+      - name: Cache build artifacts
+        uses: klever1988/cachewrtbuild@main
+        with:
+          ccache: 'true'
+          toolchain: 'true'
+          prefix: 'openwrt'
+
       - name: Checkout builder
         uses: actions/checkout@main
-
-      - name: Download OpenWrt sources
-        run: git clone --branch $REPO_BRANCH $REPO_URL.git $BUILD_ROOT
 
       - name: Initialize builder
         shell: bash
@@ -156,13 +202,6 @@ jobs:
           cd $BUILD_ROOT
           chmod +x *.sh
           wget https://github.com/fantastic-packages/packages/raw/refs/heads/24.10/keys/usign/53FF2B6672243D28.pub
-
-      - name: Cache OpenWrt build artifacts
-        uses: klever1988/cachewrtbuild@main
-        with:
-          ccache: 'true'
-          toolchain: 'true'
-          prefix: 'openwrt'
 
       - name: Update OpenWrt packages
         id: update
